@@ -334,7 +334,9 @@ class WindowsSetupTests(unittest.TestCase):
                 setup.install(root, setup.make_parser().parse_args(['install', '--source', 'workbuddy,dsh']))
             self.assertEqual(plugin.read_bytes(), b'new plugin')
             self.assertTrue(patch_path.read_bytes().startswith(user_config))
-            self.assertIn(plugin.as_uri() if sys.platform == 'win32' else str(plugin), patch_path.read_text())
+            # The transaction canonicalizes the deployment root, including Windows
+            # short-name aliases such as RUNNER~1. Require the exact canonical URI.
+            self.assertIn(json.dumps(plugin.resolve().as_uri(), ensure_ascii=False), patch_path.read_text())
             settings = setup.read_config(root)['settings']
             self.assertEqual(settings, {**previous['settings'], 'source': 'workbuddy,dsh',
                 'qoder_root': str((self.home / '.qoder-cn').resolve()), 'qoder_app_data': None})
@@ -386,11 +388,16 @@ class WindowsSetupTests(unittest.TestCase):
             previous = self.config(root, source='workbuddy')
             setup.write_json(root / 'config.json', previous)
             patch_path, plugin = self.dsh_fixture(root, managed=True)
+            # Force a real registration change on every host. An already-current
+            # block is correctly left unwritten, so it cannot inject a write fault.
+            patch_path.write_text(dsh.apply_block(patch_path.read_text(),
+                dsh.managed_block(root / 'previous-dsh/flower-observer.mjs')))
             original = patch_path.read_bytes(), plugin.read_bytes()
             runtime = self.next_runtime(root)
             actual_write = dsh._write_atomic
             def fail_patch(path, data, mode=0o600):
                 if path.resolve() == patch_path.resolve():
+                    self.assertEqual(plugin.read_bytes(), b'new plugin')
                     raise OSError('profile write denied')
                 actual_write(path, data, mode)
             with patch.object(setup, 'prepare_runtime', return_value=runtime), \
