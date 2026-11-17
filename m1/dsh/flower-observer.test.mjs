@@ -197,7 +197,7 @@ test('the observer writes a bounded snapshot next to the bridge', () => {
   assert.equal(payload.error, null);
   assert.equal(payload.tasks.length, 1);
   assert.equal(payload.tasks[0].questions, 1);
-  assert.equal(statSync(observer.file).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(observer.file).mode & 0o777, 0o600);
 });
 
 test('an unchanged snapshot is written only when the heartbeat is due', t => {
@@ -289,4 +289,24 @@ test('stopping the observer tells the bridge DSH is gone', () => {
   const payload = read(observer.file);
   assert.equal(payload.connected, false);
   assert.deepEqual(payload.tasks, []);
+});
+
+// Windows path cases carried from the verified preview candidate.
+import { observerDirectory } from './flower-observer.mjs';
+test('Windows metadata uses LOCALAPPDATA and Windows separators on any test host', () => {
+  assert.equal(observerDirectory({platform: 'win32', home: 'C:\\Users\\测试用户',
+    env: {LOCALAPPDATA: 'D:\\用户数据\\Local'}}), 'D:\\用户数据\\Local\\RotatingFlower\\dsh');
+  for (const env of [{}, {LOCALAPPDATA: ''}]) {
+    assert.equal(observerDirectory({platform: 'win32', home: 'C:\\Users\\测试用户', env}),
+      'C:\\Users\\测试用户\\AppData\\Local\\RotatingFlower\\dsh');
+  }
+  assert.equal(observerDirectory({platform: 'win32', home: 'C:\\Users\\test',
+    env: {LOCALAPPDATA: '\\\\server\\users\\local'}}), '\\\\server\\users\\local\\RotatingFlower\\dsh');
+});
+
+test('non-Windows metadata keeps the existing Python support_dir convention', () => {
+  for (const platform of ['darwin', 'linux']) {
+    assert.equal(observerDirectory({platform, home: '/home/test', env: {LOCALAPPDATA: '/ignored'}}),
+      '/home/test/Library/Application Support/RotatingFlower/dsh');
+  }
 });

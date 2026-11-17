@@ -43,6 +43,50 @@ class AttentionTests(unittest.TestCase):
         p=self.write('a',meta(),ask());self.check(1)
         old=self.adapter.files[p].offset;self.assertFalse(self.adapter.poll(NOW));self.assertEqual(self.adapter.files[p].offset,old)
         self.write('a',reply(),append=True);self.check(0)
+    def test_old_mtime_file_growth_discovers_new_question_and_reply(self):
+        with patch('attention_state.is_windows', return_value=False):
+            self.write('held-open',meta(),mtime=NOW-2000)
+            self.check(0)
+            self.write('held-open',ask(),append=True,mtime=NOW-2000)
+            self.check(1)
+            self.write('held-open',reply(),append=True,mtime=NOW-2000)
+            self.check(0)
+
+    def test_windows_change_time_recovers_old_mtime_after_restart(self):
+        cache=self.root/'restart-cache.json'
+        self.adapter.close()
+        self.adapter=AttentionAdapter(self.root,state_path=cache,start_timestamp=NOW-1000)
+        with patch('attention_state.is_windows', return_value=True), \
+                patch('attention_state.windows_file_change_time', return_value=NOW):
+            self.write('held-open',meta(),mtime=NOW-2000)
+            self.check(0)
+            self.write('held-open',ask(),append=True,mtime=NOW-2000)
+            # Restart before the running adapter has seen the newly appended ask.
+            self.adapter.close()
+            self.adapter=AttentionAdapter(self.root,state_path=cache,start_timestamp=NOW)
+            self.check(1)
+
+    def test_windows_change_time_does_not_import_historical_questions(self):
+        with patch('attention_state.is_windows', return_value=True), \
+                patch('attention_state.windows_file_change_time', return_value=NOW):
+            self.write('history',meta(),ask(age=2000),mtime=NOW-2000)
+            self.check(0)
+
+    def test_windows_change_time_access_failure_is_retried(self):
+        with patch('attention_state.is_windows', return_value=True), \
+                patch('attention_state.windows_file_change_time', side_effect=[PermissionError(),NOW]) as query:
+            self.write('held-open',meta(),ask(),mtime=NOW-2000)
+            self.check(0)
+            self.check(1)
+            self.assertEqual(query.call_count,2)
+
+    def test_windows_unchanged_old_file_change_time_is_only_probed_once(self):
+        with patch('attention_state.is_windows', return_value=True), \
+                patch('attention_state.windows_file_change_time', return_value=NOW-2000) as query:
+            self.write('history',meta(),mtime=NOW-2000)
+            self.check(0)
+            self.check(0)
+            query.assert_called_once()
     def test_multi_questions_exact_ids(self):
         self.write('a',meta(),ask(count=2),ask('b'),reply('wrong'),reply('a',0));self.check(2)
         self.write('a',reply('b'),append=True);self.check(1)
@@ -97,6 +141,22 @@ class AttentionTests(unittest.TestCase):
         new=self.root/'new';new.write_text(json.dumps(meta())+'\n');os.utime(new,(NOW,NOW));new.replace(p);self.check(1)
         self.write('a',ask(),append=True);self.check(1)
         self.write('a',meta());self.check(1)
+    def test_poll_releases_handle_but_keeps_cursor_and_pending(self):
+        p=self.write('a',meta(),ask());self.check(1)
+        cursor=self.adapter.files[p].offset
+        self.assertTrue(self.adapter.files[p].file.closed)
+        self.check(1)
+        self.assertEqual(self.adapter.files[p].offset,cursor)
+        self.assertTrue(self.adapter.files[p].file.closed)
+        self.write('a',reply(),append=True);self.check(0)
+        self.assertTrue(self.adapter.files[p].file.closed)
+
+    def test_reopen_conflict_preserves_pending_and_retries_reply(self):
+        self.write('a',meta(),ask());self.check(1)
+        self.write('a',reply(),append=True)
+        with patch('attention_state.open_read_shared',side_effect=PermissionError('writer replacing')):
+            self.check(1)
+        self.check(0)
     def test_root_replaced_with_subagent(self):
         p=self.write('a',meta(),ask());self.check(1)
         other=self.write('b',meta(parent_thread_id='x'),ask());other.replace(p);self.check(1)
@@ -142,7 +202,8 @@ class AttentionTests(unittest.TestCase):
         self.adapter.close();self.adapter=AttentionAdapter(self.root,state_path=cache,start_timestamp=NOW-10)
         self.write('a',meta(),ask());self.check(1)
         content=cache.read_text();self.assertNotIn('Test question',content)
-        self.assertEqual(cache.stat().st_mode & 0o777,0o600)
+        if os.name != 'nt':
+            self.assertEqual(cache.stat().st_mode & 0o777,0o600)
         self.write('a',reply(),append=True);self.check(0)
         content=cache.read_text();self.assertNotIn('answer',content);self.assertNotIn('Test question',content)
         self.assertFalse(list(self.root.glob('attention-state.json.*.tmp')))

@@ -1,3 +1,5 @@
+# Selected test changes adapted from Bella PR #5, e698b752.
+# See docs/bella-pr5-integration-proposal-20261116.md for scope and provenance.
 import json
 import os
 from pathlib import Path
@@ -22,18 +24,26 @@ class WorkBuddyAdapterTests(unittest.TestCase):
         self.db = self.root / 'workbuddy.db'
         self.log = self.root / 'logs/daemon.log'
         self.log.write_text('')
-        with sqlite3.connect(self.db) as c:
+        c = sqlite3.connect(self.db)
+        try:
             c.execute('CREATE TABLE sessions(id TEXT,status TEXT,updated_at INTEGER,model TEXT,transport TEXT,deleted_at INTEGER)')
+            c.commit()
+        finally:
+            c.close()
         self.adapter = WorkBuddyAdapter(self.root)
         self.now = 1800000000
-        self.kill = patch('workbuddy_adapter.os.kill').start()
+        self.kill = patch('workbuddy_adapter.process_alive', return_value=True).start()
         self.addCleanup(patch.stopall)
 
     def task(self, sid='one', status='working', model='fast-model', at=None, pid=123, started=1):
         at = self.now if at is None else at
-        with sqlite3.connect(self.db) as c:
+        c = sqlite3.connect(self.db)
+        try:
             c.execute('DELETE FROM sessions WHERE id=?', (sid,))
             c.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?)', (sid,status,int(at*1000),model,'local',None))
+            c.commit()
+        finally:
+            c.close()
         (self.root / f'sessions/{pid}.json').write_text(json.dumps({'pid':pid,'sessionId':sid,'startedAt':started}))
 
     def event(self, sid='one', status='pending', kind='question', at=None, partial=False, scope='daemon-server:task-notify'):
@@ -144,6 +154,16 @@ class WorkBuddyAdapterTests(unittest.TestCase):
         self.assertEqual(state['motor'],'STOP')
         self.assertIn('denied',state['error'])
         self.assertFalse(state['healthy'])
+
+    def test_dead_worker_boolean_result_stops_work_and_attention(self):
+        self.task(status='pending')
+        self.event()
+        self.assertTrue(self.poll()['light'])
+        self.kill.return_value = False
+        state = self.poll()
+        self.assertEqual(state['motor'], 'STOP')
+        self.assertFalse(state['light'])
+        self.assertEqual(state['working_threads'], [])
 
     def test_missing_notifier_log_is_not_reported_as_fully_supported(self):
         self.task()
@@ -286,8 +306,12 @@ class WorkBuddyAdapterTests(unittest.TestCase):
     def test_old_sdk_terminal_does_not_stop_a_new_database_turn(self):
         self.long_task()
         self.sdk('runtime-status:persisted',at=self.now-.001,status='completed')
-        with sqlite3.connect(self.db) as c:
+        c = sqlite3.connect(self.db)
+        try:
             c.execute('UPDATE sessions SET updated_at=?',(int(self.now*1000),))
+            c.commit()
+        finally:
+            c.close()
         # The new SDK PROMPT_SENT may not have been flushed yet.
         self.assertEqual(self.poll()['motor'],'RUN LOW')
 
@@ -295,8 +319,12 @@ class WorkBuddyAdapterTests(unittest.TestCase):
         self.long_task(sdk_age=120)
         self.assertEqual(self.poll()['motor'],'STOP')
         self.sdk('runtime-status:persisted',at=self.now-110,status='completed')
-        with sqlite3.connect(self.db) as c:
+        c = sqlite3.connect(self.db)
+        try:
             c.execute('UPDATE sessions SET updated_at=?',(int((self.now-100)*1000),))
+            c.commit()
+        finally:
+            c.close()
         self.sdk('state-machine:transition',at=self.now-100,input='PROMPT_SENT',valid=True,to='working')
         self.sdk('event-machine:dispatch',at=self.now-10,input='session_info_update',requestId='new-turn')
         self.adapter.stale_seconds=1
@@ -329,10 +357,14 @@ class WorkBuddyAdapterTests(unittest.TestCase):
         self.assertEqual(self.poll(91)['motor'],'STOP')
 
     def test_legacy_schema_without_model(self):
-        with sqlite3.connect(self.db) as c:
+        c = sqlite3.connect(self.db)
+        try:
             c.execute('DROP TABLE sessions')
             c.execute('CREATE TABLE sessions(id TEXT,status TEXT,updated_at INTEGER,transport TEXT,deleted_at INTEGER)')
             c.execute('INSERT INTO sessions VALUES(?,?,?,?,NULL)',('one','working',int(self.now*1000),'local'))
+            c.commit()
+        finally:
+            c.close()
         (self.root/'sessions/123.json').write_text(json.dumps({'pid':123,'sessionId':'one'}))
         self.assertEqual(self.poll()['motor'],'RUN LOW')
 

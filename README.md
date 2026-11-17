@@ -16,6 +16,8 @@ https://github.com/user-attachments/assets/f6ea34b5-76c4-4571-9aa7-4811f79ccf80
 
 [Download the original video](docs/media/rotating-flower-demo-en-zh.mp4) · [中文页面](README.zh-CN.md#watch) · [Model redesign status](hardware/README.md)
 
+Windows installer source and test-candidate work are being integrated. See the [Windows preview instructions](docs/windows.md) and [contribution provenance](docs/windows-contributions.md). Existing v0.7.0 downloads remain Mac-only; no new Windows release is announced here.
+
 ## What it tells you
 
 | Your AI task | Your flower |

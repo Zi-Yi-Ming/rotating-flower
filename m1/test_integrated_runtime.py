@@ -58,6 +58,7 @@ class IntegratedRuntimeTests(unittest.TestCase):
             real_stop = bridge.Flower.stop
             with patch.object(sys, "argv", argv), \
                  patch.object(bridge, "WorkBuddyAdapter", return_value=adapter), \
+                 patch.object(bridge, "serial_candidates", return_value=["fixture-port"]), \
                  patch.object(bridge.Flower, "send", autospec=True, return_value=False) as send, \
                  patch.object(bridge.Flower, "stop", autospec=True, side_effect=real_stop) as stop, \
                  patch.object(tempfile, "gettempdir", return_value=str(root)), \

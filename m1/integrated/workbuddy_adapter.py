@@ -18,6 +18,8 @@ import re
 import sqlite3
 import time
 
+from platform_support import open_read_shared, process_alive
+
 RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "XHIGH": 4, "ULTRA": 5}
 WORKING = frozenset(("working", "planning"))
 WAITING = frozenset(("pending", "waiting_permission"))
@@ -96,7 +98,7 @@ class NotifierEvents:
         for name in ("daemon.old.log", "daemon.log"):
             path = self.root / "logs" / name
             try:
-                with path.open("rb") as file:
+                with open_read_shared(path) as file:
                     stat = os.fstat(file.fileno())
                     identity = (stat.st_dev, stat.st_ino)
                     cursor = self.cursors.get(name)
@@ -218,7 +220,7 @@ class SdkActivity:
                 path = day / 'sdk/conversations' / (sid + '.log')
                 keep.add(path)
                 try:
-                    with path.open('rb') as file:
+                    with open_read_shared(path) as file:
                         stat = os.fstat(file.fileno())
                         identity = (stat.st_dev, stat.st_ino)
                         old = self.cursors.get(path)
@@ -297,7 +299,8 @@ class WorkBuddyAdapter:
                 pid, sid = data.get('pid'), data.get('sessionId')
                 if type(pid) is not int or pid <= 0 or str(pid) != path.stem or not isinstance(sid, str) or not sid:
                     continue
-                os.kill(pid, 0)
+                if not process_alive(pid):
+                    continue
                 started = data.get('startedAt')
                 if not isinstance(started, (str, int, float)):
                     started = None

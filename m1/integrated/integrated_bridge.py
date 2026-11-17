@@ -6,15 +6,8 @@ from pathlib import Path
 import select
 import signal
 import subprocess
-import tempfile
+import sys
 import time
-
-try:
-    import fcntl
-    import termios
-except ImportError:  # Windows: imports for tests and read-only state checks only.
-    fcntl = None
-    termios = None
 
 from motor_bridge_base import CodexRolloutAdapter, serial_candidates
 from attention_state import AttentionAdapter
@@ -25,6 +18,8 @@ from workbuddy_adapter import WorkBuddyAdapter
 from dsh_adapter import DshAdapter
 from qodercn_adapter import QoderCnSource
 from source_config import CHOICES, enabled_sources
+from platform_support import acquire_lock, bridge_lock_path, is_windows
+from serial_transport import PosixSerialTransport, open_transport, write_frame
 
 
 def select_outputs(known_rollouts, snapshot, pending, now):
@@ -66,19 +61,26 @@ def log(message):
 
 class Flower:
     def __init__(self, port='auto'):
-        self.port=port; self.fd=None; self.path=None
+        self.port=port; self.transport=None; self.path=None
         self.last_probe=-100; self.last_send=-100; self.last_state=None
         self.buffer=b''
         self.last_device_line=None
         self.capabilities=[]
 
+    @property
+    def fd(self):
+        # Retain the connection marker used by FlowerGroup and older callers.
+        return self.transport.handle if self.transport is not None else None
+
+    @fd.setter
+    def fd(self, value):
+        self.transport=PosixSerialTransport(value) if value is not None else None
+
     def close(self):
-        if self.fd is not None:
-            try: fcntl.ioctl(self.fd,termios.TIOCNXCL)
+        if self.transport is not None:
+            try: self.transport.close()
             except OSError: pass
-            try: os.close(self.fd)
-            except OSError: pass
-        self.fd=None; self.path=None; self.last_state=None; self.buffer=b''
+        self.transport=None; self.path=None; self.last_state=None; self.buffer=b''
         self.capabilities=[]
 
     def connect(self):
@@ -89,49 +91,44 @@ class Flower:
             return False
         self.last_probe=now
         for path in serial_candidates() if self.port=='auto' else [self.port]:
-            fd=None
+            transport=None
             try:
-                subprocess.run(['stty','-f',path,'115200','raw','-echo'],check=True,capture_output=True,timeout=2)
-                fd=os.open(path,os.O_RDWR|os.O_NOCTTY|os.O_NONBLOCK)
-                fcntl.ioctl(fd,termios.TIOCEXCL)
-                os.write(fd,b'DEVICE INFO\nPING\n')
+                transport=open_transport(path)
+                write_frame(transport,b'DEVICE INFO\nPING\n')
                 data=b''; deadline=time.monotonic()+1.2
                 while time.monotonic()<deadline:
-                    if select.select([fd],[],[],.1)[0]:
-                        chunk=os.read(fd,4096)
-                        if not chunk: raise OSError('Serial EOF')
-                        data+=chunk
+                    chunk=transport.read(4096,.1)
+                    if chunk:
+                        data=(data+chunk)[-4096:]
                         if b'FLOWER_COMBINED_V1 PWM=OK ' in data:
-                            self.fd=fd; self.path=path; self.last_send=-100
+                            self.transport=transport; self.path=path; self.last_send=-100
                             self.last_state=None
                             self.capabilities=['motor','attention']
                             log('Connected integrated flower: '+path)
                             return True
                 if b'PONG' in data:
-                    self.fd=fd; self.path=path; self.capabilities=['motor']
+                    self.transport=transport; self.path=path; self.capabilities=['motor']
                     self.last_state=None; self.last_send=-100
                     log('Connected legacy motor-only flower: '+path)
                     return True
             except (OSError,subprocess.SubprocessError):
                 pass
-            if fd is not None:
-                try: fcntl.ioctl(fd,termios.TIOCNXCL)
+            if transport is not None:
+                try: transport.close()
                 except OSError: pass
-                os.close(fd)
         return False
 
     def drain(self):
         # Nonblocking and bounded: no serial response should stall heartbeats.
         for _ in range(4):
-            if not select.select([self.fd],[],[],0)[0]: break
-            chunk=os.read(self.fd,4096)
-            if not chunk: raise OSError('Serial EOF')
+            chunk=self.transport.read(4096,0)
+            if not chunk: break
             self.buffer+=chunk
             lines=self.buffer.split(b'\n');self.buffer=lines.pop()[-4096:]
             for line in lines:
                 value=line.decode(errors='replace').strip()
                 if value and value != self.last_device_line:
-                    log('DEVICE: '+value)
+                    log(f'DEVICE [{self.path}]: '+value)
                     self.last_device_line=value
 
     def send(self, motor, light):
@@ -143,16 +140,15 @@ class Flower:
                 # Report an incompatible board to setup without attempting light
                 # commands or starting motion on an unverified protocol.
                 if time.monotonic()-self.last_send>=1.5:
-                    os.write(self.fd,b'STOP\n');self.last_send=time.monotonic()
+                    write_frame(self.transport,b'STOP\n');self.last_send=time.monotonic()
                 self.drain()
                 return False
             now=time.monotonic(); state=(motor,bool(light))
             if state!=self.last_state or now-self.last_send>=1.5:
                 data=(motor+'\nATTENTION '+('ON' if light else 'OFF')+'\n').encode()
-                written=os.write(self.fd,data)
-                if written!=len(data): raise OSError('Short serial write')
+                write_frame(self.transport,data)
                 if state!=self.last_state:
-                    log(f'SENT {motor}; LIGHT={"ON" if light else "OFF"}')
+                    log(f'SENT [{self.path}] {motor}; LIGHT={"ON" if light else "OFF"}')
                 self.last_send=now; self.last_state=state
             self.drain()
             return True
@@ -163,18 +159,68 @@ class Flower:
 
     def stop(self):
         if self.fd is not None:
-            try: os.write(self.fd,b'STOP\nATTENTION OFF\n')
+            try: write_frame(self.transport,b'STOP\nATTENTION OFF\n')
             except OSError: pass
         self.close()
 
 
+class FlowerGroup:
+    """Broadcast work and attention to all flowers through one serial owner."""
+    def __init__(self, port='auto'):
+        self.port=port
+        self.flowers={}
+
+    def send(self, motor, light):
+        paths=serial_candidates() if self.port=='auto' else [self.port]
+        for path in list(self.flowers):
+            if path not in paths:
+                log('Disconnected flower: '+path)
+                self.flowers.pop(path).close()
+        for path in paths:
+            if path not in self.flowers:
+                self.flowers[path]=Flower(path)
+
+        # Keep connected boards' motor/light heartbeats ahead of discovery.
+        # Probe only one port per cycle, fairly, so absent or unrelated USB
+        # devices cannot hold up every connected flower.
+        sent=False
+        for flower in self.flowers.values():
+            if flower.fd is not None:
+                sent=flower.send(motor,light) or sent
+        now=time.monotonic()
+        pending=[flower for flower in self.flowers.values()
+                 if flower.fd is None and now-flower.last_probe>=2]
+        if pending:
+            flower=min(pending,key=lambda item:item.last_probe)
+            sent=flower.send(motor,light) or sent
+        return sent
+
+    def status(self):
+        devices=[{'port':flower.path,'capabilities':flower.capabilities,
+                  'last_device_line':flower.last_device_line}
+                 for flower in self.flowers.values() if flower.fd is not None]
+        # Retain the first connected board's fields for existing installers.
+        # Never combine capabilities from different boards into a fictional one.
+        first=devices[0] if devices else {}
+        return {'device_connected':bool(devices),'device_count':len(devices),
+                'device_port':first.get('port'),
+                'device_capabilities':first.get('capabilities',[]),
+                'last_device_line':first.get('last_device_line'),
+                'devices':devices}
+
+    def stop(self):
+        for flower in self.flowers.values():
+            flower.stop()
+        self.flowers.clear()
+
+
 class CodexSource:
-    def __init__(self, root, cache):
+    def __init__(self, root, cache, endpoint=None):
         self.root=Path(root)
         self.motor=CodexRolloutAdapter(root)
         self.attention=AttentionAdapter(root,state_path=cache)
         self.catalog=RootCatalog(root)
-        self.feed=DesktopRuntimeFeed(refresh_seconds=2)
+        self.feed=DesktopRuntimeFeed(socket_path=endpoint,refresh_seconds=2)
         self.known={}
 
     def poll(self, now):
@@ -253,45 +299,56 @@ def combine_sources(sources):
     return motor,any(s['light'] for s in healthy)
 
 
-def main():
+def main(argv=None):
+    if is_windows():
+        for stream in (sys.stdout,sys.stderr):
+            if hasattr(stream,'reconfigure'):
+                stream.reconfigure(encoding='utf-8',errors='backslashreplace')
     parser=argparse.ArgumentParser()
-    parser.add_argument('--sessions-root',type=Path,default=Path.home()/'.codex/sessions')
+    parser.add_argument('--sessions-root',type=Path,
+                        default=Path(os.environ.get('CODEX_HOME',str(Path.home()/'.codex')))/'sessions')
     parser.add_argument('--workbuddy-root',type=Path,default=Path.home()/'.workbuddy')
     parser.add_argument('--qoder-root',type=Path,default=Path.home()/'.qoder-cn')
     parser.add_argument('--qoder-app-data',type=Path,default=None)
     parser.add_argument('--source',choices=CHOICES,default='workbuddy')
-    parser.add_argument('--port',default='auto')
+    parser.add_argument('--port',default='auto',
+                        help='Serial device, or auto for all connected flowers')
     parser.add_argument('--once',action='store_true')
+    parser.add_argument('--dry-run',action='store_true',
+                        help='Continuously read task state and write status without opening USB')
+    parser.add_argument('--codex-endpoint',default=None,
+                        help='Override the discovered desktop IPC endpoint')
+    parser.add_argument('--stop-file',type=Path,
+                        help='Exit cooperatively when this file exists')
     parser.add_argument('--launch-id',default='')
     parser.add_argument('--attention-cache',type=Path,default=Path(__file__).with_name('attention-cache.json'))
     parser.add_argument('--status-file',type=Path,default=Path(__file__).with_name('status.json'))
-    args=parser.parse_args()
+    args=parser.parse_args(argv)
     lock=None
-    if not args.once:
-        if fcntl is None:
-            print('USB control requires macOS or Linux; use --once to inspect task state.')
-            return 2
-        lock=(Path(tempfile.gettempdir())/f'codex-motor-bridge-{os.getuid()}.lock').open('a+')
-        fcntl.flock(lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+    if not args.once and not args.dry_run:
+        lock=acquire_lock(bridge_lock_path())
     running=True
     def stop(*_):
         nonlocal running
         running=False
+    previous_handlers={sig:signal.getsignal(sig) for sig in (signal.SIGTERM,signal.SIGINT)}
     signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
     sources={}
     if 'codex' in enabled_sources(args.source):
-        sources['codex']=RecoveringSource(lambda:CodexSource(args.sessions_root,None if args.once else args.attention_cache))
+        sources['codex']=RecoveringSource(lambda:CodexSource(
+            args.sessions_root,None if args.once or args.dry_run else args.attention_cache,args.codex_endpoint))
     if 'workbuddy' in enabled_sources(args.source):
         sources['workbuddy']=RecoveringSource(lambda:WorkBuddyAdapter(args.workbuddy_root))
     if 'dsh' in enabled_sources(args.source):
         sources['dsh']=RecoveringSource(DshAdapter)
     if 'qodercn' in enabled_sources(args.source):
-        sources['qodercn']=RecoveringSource(
-            lambda:QoderCnSource(args.qoder_root,args.qoder_app_data))
-    flower=Flower(args.port);previous=None;last_status=0
+        sources['qodercn']=RecoveringSource(lambda:QoderCnSource(args.qoder_root,args.qoder_app_data))
+    flowers=FlowerGroup(args.port);previous=None;last_status=0
     once_deadline=time.monotonic()+5
     try:
         while running:
+            if args.stop_file and args.stop_file.exists():
+                break
             now=time.time()
             snapshots={}
             for name,source in sources.items():
@@ -310,21 +367,24 @@ def main():
                 if time.monotonic()>=once_deadline:
                     print(json.dumps({'motor':command,'light':light,'sources':snapshots}));return
             else:
-                flower.send(command,light)
+                if not args.dry_run:
+                    flowers.send(command,light)
                 if now-last_status>=1:
                     status={'updated_at':now,'launch_id':args.launch_id,'source':args.source,
-                            'sources':snapshots,'motor':command,'light':light,
-                            'device_connected':flower.fd is not None,
-                            'device_port':flower.path,'device_capabilities':flower.capabilities,
-                            'last_device_line':flower.last_device_line}
+                            'sources':snapshots,'motor':command,'light':light,'dry_run':args.dry_run,
+                            **flowers.status()}
+                    args.status_file.parent.mkdir(parents=True,exist_ok=True)
                     tmp=args.status_file.with_suffix('.tmp')
-                    tmp.write_text(json.dumps(status,indent=2)+'\n');tmp.replace(args.status_file)
+                    tmp.write_text(json.dumps(status,indent=2)+'\n',encoding='utf-8');tmp.replace(args.status_file)
                     last_status=now
             time.sleep(.3)
     finally:
-        flower.stop()
+        if not args.once and not args.dry_run:
+            flowers.stop()
         for source in sources.values():source.close()
         if lock:lock.close()
-        log('Read-only status check ended' if args.once else 'Integrated bridge stopped; STOP and light OFF requested')
+        for sig,handler in previous_handlers.items():signal.signal(sig,handler)
+        log('Read-only status check ended' if args.once or args.dry_run else
+            'Integrated bridge stopped; STOP and light OFF requested')
 
 if __name__=='__main__':main()

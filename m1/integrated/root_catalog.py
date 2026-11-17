@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 from motor_bridge_base import is_root_meta
+from platform_support import open_read_shared
 
 
 class RootCatalog:
@@ -23,7 +24,7 @@ class RootCatalog:
                 inode = path.stat().st_ino
                 if path in self.known and self.known[path][0] == inode:
                     continue
-                with path.open('rb') as f:
+                with open_read_shared(path) as f:
                     first = f.readline(1_000_001)
                 if not first.endswith(b'\n') or len(first) > 1_000_000:
                     continue

@@ -2,7 +2,7 @@
 // No network, credentials, message bodies, prompts or approval decisions.
 import { mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32, posix } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 // The bridge treats a heartbeat older than 3s as "DSH is not running".
@@ -10,6 +10,14 @@ const TICK_MS = 500;
 const HEARTBEAT_MS = 1000;
 // One failed read is a blip; a persistent one means the runtime changed.
 const FAILURE_LIMIT = 3;
+
+// Same platform convention as integrated/platform_support.py.
+export function observerDirectory({platform = process.platform, home = homedir(), env = process.env} = {}) {
+  if (platform === 'win32') {
+    return win32.join(env.LOCALAPPDATA || win32.join(home, 'AppData', 'Local'), 'RotatingFlower', 'dsh');
+  }
+  return posix.join(home, 'Library', 'Application Support', 'RotatingFlower', 'dsh');
+}
 
 export function foldEvent(state, event) {
   if (event?.type === 'turn/start' || event?.type === 'turn/end') {
@@ -70,7 +78,7 @@ export function agentMetadata(agent, projections, cursors) {
 }
 
 export function createObserver(scope, options = {}) {
-  const root = options.root ?? join(homedir(), 'Library', 'Application Support', 'RotatingFlower', 'dsh');
+  const root = options.root ?? observerDirectory();
   const tick = options.tick ?? TICK_MS;
   const heartbeat = options.heartbeat ?? HEARTBEAT_MS;
   const limit = options.limit ?? FAILURE_LIMIT;

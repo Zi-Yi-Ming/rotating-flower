@@ -59,6 +59,8 @@ https://github.com/user-attachments/assets/f6ea34b5-76c4-4571-9aa7-4811f79ccf80
 
 小花软件支持 **Apple 芯片 Mac、macOS 12+**；DSH 自身需要 **macOS 13+**。
 
+Windows 安装器源码与测试候选正在整合，见 [Windows 预览说明](docs/windows.md) 和 [贡献记录](docs/windows-contributions.md)。现有 v0.7.0 下载包仍仅用于 Mac，Windows 新包尚未正式发布。
+
 <a id="install"></a>
 
 ## 已有小花：安装 Mac 软件

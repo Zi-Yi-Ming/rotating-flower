@@ -18,7 +18,8 @@ RUNTIME_FILES = ("integrated_setup.py", "integrated_install.sh", "dsh_setup.py",
                  "dsh/flower-observer.mjs")
 BRIDGE_FILES = ("integrated_bridge.py", "attention_state.py", "motor_bridge_base.py",
                 "runtime_feed.py", "state_reducer.py", "root_catalog.py", "workbuddy_adapter.py",
-                "dsh_adapter.py", "qodercn_adapter.py", "source_config.py")
+                "dsh_adapter.py", "qodercn_adapter.py", "source_config.py",
+                "platform_support.py", "serial_transport.py", "windows_ipc.py")
 
 GUIDE = """小花 · Mac 统一安装
 

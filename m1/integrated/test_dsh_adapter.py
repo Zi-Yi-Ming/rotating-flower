@@ -78,11 +78,13 @@ class DshAdapterTests(unittest.TestCase):
         self.assertTrue(self.poll()['healthy'])
 
     def test_a_permission_denied_probe_still_counts_as_alive(self):
-        with patch('dsh_adapter.os.kill', side_effect=PermissionError):
+        with patch('dsh_adapter._process_alive', side_effect=PermissionError), \
+             patch('dsh_adapter.is_windows', return_value=False):
             self.assertTrue(process_alive(4242))
 
     def test_a_missing_process_is_reported_as_gone(self):
-        with patch('dsh_adapter.os.kill', side_effect=ProcessLookupError):
+        with patch('platform_support.os.kill', side_effect=ProcessLookupError), \
+             patch('platform_support.is_windows', return_value=False):
             self.assertFalse(process_alive(4242))
 
     def test_close_is_harmless(self):
