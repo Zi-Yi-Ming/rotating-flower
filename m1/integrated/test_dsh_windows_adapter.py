@@ -71,4 +71,3 @@ class DshWindowsReadTests(unittest.TestCase):
         for names in (('dsh',),('codex','dsh'),('workbuddy','dsh'),('codex','workbuddy','dsh')):
             self.assertEqual(enabled_sources(selection_for(names)),names)
         self.assertEqual(enabled_sources('both'),('codex','workbuddy'))
-

@@ -1,5 +1,5 @@
 """Adapted from Bella PR #5 test_posix_exclusive.py, e698b752.
-See docs/bella-pr5-integration-proposal-20261116.md for provenance.
+See docs/windows-contributions.md for provenance.
 """
 import errno
 import sys

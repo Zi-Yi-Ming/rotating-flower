@@ -1,6 +1,6 @@
 # Windows installation preview
 
-This is the source integration for `0.7.0-windows-preview.6-main-integration`, not a new public Release. Existing v0.7.0 download assets are Mac-only. The earlier preview.5 passed the recorded Windows 10 hardware checks; this new package requires targeted verification after its DSH and installer changes.
+This is the source integration for `0.7.0-windows-preview.6-main-integration`, not a new public Release. Existing v0.7.0 download assets are Mac-only. The archived preview.6 has passed its targeted Windows 10 DSH upgrade, independent-Python migration and login-startup checks. A clean-user first installation has not yet been verified. See the [validation record](#validation-and-attribution) for the exact package and scope.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ The launcher deliberately reuses an existing flower interpreter when present, to
 & 'C:\path-to-independent-Python\python.exe' -X utf8 .\app\windows_setup.py install
 ```
 
-Replace the example with the verified actual executable path. This rebuilds the environment and login entry. Verify diagnostics, one real task and login recovery before removing the old interpreter. This specific fresh/migration path still needs Windows acceptance; do not treat a software fixture as proof of a consumer installation.
+Replace the example with the verified actual executable path. This rebuilds the environment and login entry. Verify diagnostics, one real task and login recovery before removing the old interpreter. Migration to an independent Python 3.13.17 and subsequent login startup passed on the recorded Windows 10 setup; a clean-user first installation remains untested.
 
 DSH remains limited in this Windows installer to the default `~/.dsh` desktop profile. Upgrading the existing managed block uses a file URI; configuration receipts preserve original bytes and user edits. The observer keeps main's event retry and temporary-failure recovery, with Windows status paths. Removal preserves a shared observer still referenced by another profile.
 
@@ -55,13 +55,48 @@ DSH remains limited in this Windows installer to the default `~/.dsh` desktop pr
 - `diagnose.cmd` reports the installed interpreter, the precise HKCU startup key/value it queried, and source state; it does not drive USB. Registry access denial is reported as a query error, not as proof the value is absent.
 - Installation steps are recorded in `logs/install-events.jsonl`, including the failing stage, exception type and OS error/path when available. If even the log directory is denied, the original failure still goes to stderr. Keep the terminal output.
 - Background logs are in `logs/bridge.log`; windowless startup failures may appear in `logs/startup-error.log` or `runner-error.log`.
-- Earlier preview.5 had an unresolved initial WinError 5, followed by a successful unchanged-package installation in an independent terminal. The new diagnostics improve evidence; they do not claim its root cause was fixed. An earlier registry query disagreed with observed successful autostart; the new diagnostic makes future comparison explicit, not a retrospective diagnosis.
+- Earlier preview.5 had an unresolved initial WinError 5, followed by a successful unchanged-package installation in an independent terminal. It did not recur during the recorded preview.6 installs; its original cause remains unknown.
+- Run diagnostics as the same Windows user who installed the bridge. During migration testing, an AI tool used a separate sandbox account: its HKCU query did not see the interactive user's startup entry, and its installer-lock access was denied. The user's ordinary terminal successfully read the entry and ran status/diagnose. Check the execution identity before treating these errors as a missing startup entry or an installation failure; this finding does not establish the cause of the earlier WinError 5.
 - Qoder structured question waits are supported; command-approval waits are not. Sessions with no updates expire after the existing 600-second retention. See [Qoder details](qodercn.md).
 
 ## Validation and attribution
 
-The unchanged preview.5 passed [Windows Python 3.11/3.13 CI](https://github.com/dalaofei1154/rotating-flower/actions/runs/44022917649), then reported Win10 single-flower rotation, question-wait light, reboot/login recovery, USB reconnect, stop/start, previous-source regression and Qoder + WorkBuddy overlap checks. Returned package/installed-file hashes matched its baseline. This does not certify preview.6 or every OS/application version.
+This records a tested candidate, not a new Release or a guarantee for every Windows/application version. Original packages and their build-time verification flags remain unchanged.
 
-For this integration: run the existing Mac tests and the Windows/portable workflow against the final source; verify DSH upgrade, user config preservation and task/wait/resume; check the chosen independent-Python installation path. Re-test other hardware paths when affected by actual code changes, not merely because documentation changed.
+### Exact candidate
 
-Each new package includes file hashes, source revision information and [contribution provenance](windows-contributions.md). Old archived packages are not rewritten. Only share a sanitized report, not application databases, full conversations or private machine paths.
+- Base main: `a3e6adbf235f4e0eec06e5512daa638047da0f9e` (includes Qoder CN PR #8).
+- Tested source: `c8296c54be84e459223a6bfcc9bf98e9242a4255`.
+- Package: `RotatingFlower-Windows-v0.7.0-windows-preview.6-main-integration.zip`.
+- Package SHA256: `31dd8253bfa49bd4fb7e8050abd831665227903ad041c9854fe619530d3a7d0c`.
+- Cloud source snapshot SHA256: `f3bad0f48843b783c182864f919609e6382c9c1de9c4f4dc77158af0dea31edc`.
+
+### Software checks
+
+The [final validation run](https://github.com/dalaofei1154/rotating-flower/actions/runs/44058293084) passed Windows and Ubuntu Python 3.11/3.13 and macOS Python 3.9/3.13. Each job checked the source snapshot, ran bridge/installation/DSH/package regressions appropriate to that platform, ran the observer tests, and compared every rebuilt package entry against the supplied candidate. The dedicated CI branch commit is `64d62a35eeb694291569f1d0820baba6d34f7d51`; it executes the verified source snapshot rather than testing the older files at that branch's root.
+
+The first run exposed two test-fixture issues: a Windows short-path alias was compared to its canonical spelling, and an unchanged Linux registration correctly skipped the write where the test expected to inject failure. The final source corrects the assertion and supplies a registration that actually requires a write. No runtime change was made to bypass these failures.
+
+### Windows hardware checks
+
+Returned evidence from Windows 10 Home China 22H2, build 19045, with one flower was cross-checked against the original package. Evidence consists of application/device logs, interpreter/configuration/process records, file hashes and explicit user observations. The maintainer's review did not remotely re-read the Windows filesystem.
+
+- DSH 0.2.2-rc.3: upgrade from preview.5, user-configuration preservation, a single managed file-URI registration, repeated installation and plugin reload passed. A real task ran, stopped with the question light on, resumed with the light off after an answer, then stopped at completion. Other sources were idle in the observed window.
+- One preference differed between the first-upgrade snapshot and the later reinstall. The returned immediate pre-install backup comparison records that the preference had changed before the second install and was preserved by it. The intervening preference change was not investigated. The original configuration used LF without a BOM, so BOM/CRLF hardware checks were not applicable; software cases cover those formats.
+- Migration from WorkBuddy's Python to an independent Python 3.13.17 AMD64 passed using the unmodified installer in the user's ordinary PowerShell. The new venv base and running interpreter paths matched the independent installation; saved source/path/port/mode settings were preserved. Old interpreters and runtimes were retained.
+- After reboot and login, the user startup entry, process start times, a new recorded startup timestamp, refreshed state, USB connection logs and the no-manual-start operation record support successful login startup. The short-lived bootstrap process's complete command line was not captured. This is current-user login startup, not a pre-login system service.
+- After login, a real DSH task produced rotation and stopping, confirmed by the user and device log. Other sources were idle. Previously passed question-light and four-source scenarios were not repeated in this migration round.
+- Both field-test rounds report the same original ZIP hash; all 30 package-file hashes and 17 installed app-file hashes matched the local original during review. No source patch, extra startup helper, manual registry repair or scheduled-task workaround was used.
+
+The saved configuration retained Codex, WorkBuddy, DSH and Qoder CN. This does not constitute a fresh four-application acceptance run on preview.6. The earlier preview.5 has separate records for four-source regression, Qoder/WorkBuddy overlap, USB recovery and stop/start.
+
+### Remaining limits
+
+- A clean-user first installation, Windows 11, multiple devices and arbitrary application versions are not covered by this evidence.
+- The preview still needs a separate Python installation; a bundled consumer runtime is not implemented.
+- A separate sandbox account could not see the interactive user's HKCU startup entry and could not access the installer lock. The interactive user's terminal successfully queried both registry views and ran diagnostics. This explains that observed context discrepancy, not the historical WinError 5.
+- The earlier WinError 5 did not recur in these installations; its original cause remains unresolved. Some terminal text had encoding artifacts; structured evidence was readable.
+
+Later documentation or provenance-comment edits should be distinguished from the tested source. A rebuilt ZIP has its own identity and must not inherit this package's hash. Review source/payload differences before deciding whether further software or hardware checks are needed.
+
+Contribution provenance is recorded in [windows-contributions.md](windows-contributions.md). The earlier preview.5 [Windows CI run](https://github.com/dalaofei1154/rotating-flower/actions/runs/44022917649) and its hardware records remain a separate baseline. Only share sanitized evidence, not application databases, conversations or private machine paths.
