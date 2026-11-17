@@ -1,3 +1,5 @@
+# Selected test changes adapted from Bella PR #5, e698b752.
+# See docs/bella-pr5-integration-proposal-20261116.md for scope and provenance.
 """First-use recovery with real temporary metadata; no desktop or USB access."""
 from datetime import datetime, timezone
 import json
@@ -126,11 +128,15 @@ class ReadinessRecoveryTests(unittest.TestCase):
         (root / 'sessions').mkdir(parents=True, exist_ok=True)
         (root / 'logs').mkdir(exist_ok=True)
         (root / 'logs/daemon.log').write_text('')
-        with sqlite3.connect(root / 'workbuddy.db') as db:
+        db = sqlite3.connect(root / 'workbuddy.db')
+        try:
             db.execute('CREATE TABLE sessions(id TEXT,status TEXT,updated_at INTEGER,'
                        'model TEXT,transport TEXT,deleted_at INTEGER)')
             db.execute('INSERT INTO sessions VALUES(?,?,?,?,?,NULL)',
                        (CHAT, 'working', int(self.now * 1000), 'balanced-model', 'local'))
+            db.commit()
+        finally:
+            db.close()
         (root / 'sessions/123.json').write_text(json.dumps({
             'pid': 123, 'sessionId': CHAT, 'startedAt': int((self.now - 1) * 1000),
             'kind': 'interactive'}))
@@ -145,7 +151,7 @@ class ReadinessRecoveryTests(unittest.TestCase):
         self.assertFalse(root.exists())
 
         self.create_workbuddy(root)
-        with patch('workbuddy_adapter.os.kill'):
+        with patch('workbuddy_adapter.process_alive', return_value=True):
             recovered = adapter.poll(self.now)
         self.assertEqual(recovered['readiness'], 'ready')
         self.assertTrue(recovered['healthy'])
@@ -165,15 +171,19 @@ class ReadinessRecoveryTests(unittest.TestCase):
 
         path.unlink()
         self.create_workbuddy(root)
-        with patch('workbuddy_adapter.os.kill'):
+        with patch('workbuddy_adapter.process_alive', return_value=True):
             recovered = adapter.poll(self.now)
         self.assertEqual((recovered['readiness'], recovered['motor']), ('ready', 'RUN HIGH'))
 
     def test_existing_workbuddy_database_without_expected_schema_is_error(self):
         root = self.root / 'workbuddy'
         root.mkdir()
-        with sqlite3.connect(root / 'workbuddy.db') as db:
+        db = sqlite3.connect(root / 'workbuddy.db')
+        try:
             db.execute('CREATE TABLE unrelated(id TEXT)')
+            db.commit()
+        finally:
+            db.close()
         state = WorkBuddyAdapter(root).poll(self.now)
         self.assertEqual(state['readiness'], 'error')
         self.assertTrue(state['error'])

@@ -1,0 +1,52 @@
+# Portable CI approach adapted from Bella-rab PR #5 (e698b752).
+# Existing macOS Python 3.9/3.13 checks remain in tests.yml.
+name: Windows and portable software tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['m1/**', 'docs/windows*.md', '.github/workflows/windows-software.yml']
+  pull_request:
+    paths: ['m1/**', 'docs/windows*.md', '.github/workflows/windows-software.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  software:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Bridge and platform tests without hardware
+        run: python -B -m unittest discover -s m1/integrated -p 'test_*.py'
+      - name: Windows installation, DSH migration and package checks
+        shell: bash
+        run: |
+          python -B -m unittest discover -s m1 -p 'test_windows*.py'
+          python -B -m unittest discover -s m1 -p 'test_dsh*.py'
+          python -B -m unittest discover -s m1 -p 'test_package_windows.py'
+          python -B -m unittest discover -s m1 -p 'test_packaged_bridge_runtime.py'
+      - name: DSH observer including Windows paths
+        run: node --test m1/dsh/*.test.mjs
+      - name: Build source preview package
+        run: python m1/package_windows.py --output dist/windows-preview
