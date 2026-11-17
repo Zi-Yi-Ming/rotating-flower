@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import struct
+import sys
 import threading
 import time
 import uuid
@@ -21,6 +23,33 @@ WATCH_FIELDS = {"id", "hostId", "parentThreadId", "threadSource", "source",
                 "threadRuntimeStatus", "requests", "latestReasoningEffort"}
 VALID_STATUS = {"active", "idle", "notLoaded", "systemError"}
 VALID_FLAGS = {"waitingOnApproval", "waitingOnUserInput"}
+
+
+def default_endpoint():
+    # Windows path and LE32 framing found in installed desktop 26.1103.60933,
+    # .vite/build/early-bootstrap-824-8c6252e0131a7fe3.js, module 92272.
+    # This is a private protocol; Windows app interoperability needs live QA.
+    if sys.platform == "win32":
+        from windows_ipc import DEFAULT_PIPE
+        return DEFAULT_PIPE
+    return str(Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "ipc/ipc.sock")
+
+
+def open_transport(endpoint):
+    if sys.platform == "win32":
+        from windows_ipc import WindowsPipe
+        return WindowsPipe(endpoint)
+    st = os.lstat(endpoint)
+    if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid():
+        raise PermissionError("Codex IPC must be a socket owned by the current user")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(0.25)
+        sock.connect(endpoint)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
 
 
 def apply_metadata_patches(state, patches):
@@ -102,7 +131,7 @@ class DesktopRuntimeFeed:
     """Background socket reader; set_targets()/snapshot() never perform I/O."""
 
     def __init__(self, socket_path=None, refresh_seconds=2.0, reconnect_seconds=2.0):
-        self.socket_path = str(socket_path or Path.home() / ".codex/ipc/ipc.sock")
+        self.socket_path = str(socket_path or default_endpoint())
         self.refresh_seconds = max(2.0, float(refresh_seconds))
         self.reconnect_seconds = max(0.2, float(reconnect_seconds))
         self._lock = threading.Lock()
@@ -150,6 +179,7 @@ class DesktopRuntimeFeed:
     def _request(self, method, params, version=0, thread_id=None):
         request_id = str(uuid.uuid4())
         self._pending[request_id] = (method, thread_id)
+        self._pending_deadlines[request_id] = time.monotonic() + 3
         self._send({"type": "request", "requestId": request_id, "sourceClientId": self._client,
                     "version": version, "method": method, "params": params, "timeoutMs": 2000})
 
@@ -171,19 +201,24 @@ class DesktopRuntimeFeed:
     def _run(self):
         while not self._stop.is_set():
             try:
-                # Do not follow symlinks to arbitrary sockets owned by another user.
-                st = os.lstat(self.socket_path)
-                if st.st_uid != os.getuid():
-                    raise PermissionError("socket owner mismatch")
-                self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self._sock.settimeout(0.25)
-                self._sock.connect(self.socket_path)
+                self._sock = open_transport(self.socket_path)
                 self._client = "initializing-client"
                 self._pending, self._owners, self._states, self._revisions = {}, {}, {}, {}
+                self._pending_deadlines = {}
+                with self._lock:
+                    self._threads = {}
+                    self._last_message_at = None
                 self._request("initialize", {"clientType": "rotating-flower-observer"})
+                initialize_deadline = time.monotonic() + 3
                 buf, refreshed = bytearray(), float("-inf")
                 while not self._stop.is_set():
                     now = time.monotonic()
+                    if self._client == "initializing-client" and now >= initialize_deadline:
+                        raise TimeoutError("Codex IPC initialization timed out")
+                    for request_id, deadline in list(self._pending_deadlines.items()):
+                        if now >= deadline:
+                            self._pending.pop(request_id, None)
+                            self._pending_deadlines.pop(request_id, None)
                     with self._lock:
                         targets = set(self._targets)
                     if self._client != "initializing-client" and now - refreshed >= self.refresh_seconds:
@@ -205,24 +240,30 @@ class DesktopRuntimeFeed:
                     buf.extend(data)
                     while len(buf) >= 4:
                         length = struct.unpack_from("<I", buf)[0]
-                        if length > 64 * 1024 * 1024:
-                            raise ValueError("oversize IPC frame")
+                        if not 0 < length <= 64 * 1024 * 1024:
+                            raise ValueError("invalid IPC frame length")
                         if len(buf) < 4 + length:
                             break
                         frame = json.loads(bytes(buf[4:4 + length]))
                         del buf[:4 + length]
                         self._handle(frame, targets)
-            except (OSError, ValueError, EOFError, KeyError, TypeError, IndexError) as exc:
+            except (OSError, ValueError, EOFError, KeyError, TypeError, IndexError, AttributeError) as exc:
                 with self._lock:
                     self._connected = False
                     self._error = type(exc).__name__
             finally:
+                with self._lock:
+                    self._connected = False
+                    self._last_message_at = None
+                    self._threads = {}
                 if self._sock:
                     self._sock.close()
                     self._sock = None
             self._stop.wait(self.reconnect_seconds)
 
     def _handle(self, message, targets):
+        if not isinstance(message, dict):
+            raise ValueError("invalid IPC message")
         with self._lock:
             self._last_message_at = time.time()
         if message.get("type") == "client-discovery-request":
@@ -230,6 +271,8 @@ class DesktopRuntimeFeed:
                         "response": {"canHandle": False}})
             return
         if message.get("type") == "response":
+            if hasattr(self, "_pending_deadlines"):
+                self._pending_deadlines.pop(message.get("requestId"), None)
             method, tid = self._pending.pop(message.get("requestId"), (None, None))
             if method == "initialize":
                 if message.get("resultType") != "success":

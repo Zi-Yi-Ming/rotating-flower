@@ -6,7 +6,7 @@ Qoder 适配器、来源选择和回归测试由 **Y1X1n** 在 [PR #8](https://g
 
 ## 当前交付范围与测试
 
-本次 PR 纳入 Qoder 适配器、测试及 macOS 源码入口；它不包含完整 Windows USB 后端和安装器，也不更新已有的 v0.7.0 下载包。
+PR #8 已纳入 Qoder 适配器、测试及 macOS 源码入口。本整合分支进一步提供 Windows USB 后端、安装器和打包源码，见 [Windows 预览说明](windows.md)；它不更新已有的 v0.7.0 下载包。
 
 作者报告基于 Qoder CN **1.1.79** 的 Windows 本地记录和实际硬件验证。维护者另外在 Windows 10 22H2、Qoder CN 可执行文件报告版本 **0.5.13.0** 上测试了 preview.5 整合候选包：转停、结构化问答提醒、回答恢复、重启自启、USB 重连、stop/start、Codex/WorkBuddy/DSH 回归及 Qoder + WorkBuddy 并发均完成。两个版本号来自不同记录方式，不能据此推断同一版本范围全部兼容。
 
@@ -51,7 +51,7 @@ Qoder CN 把本地会话追加写入 JSONL 文件：
 
 ### Windows
 
-完整 Windows 安装器另行准备中。本 PR 不提供此前试用包中的编号 .cmd 入口，也不提供 Windows USB 控制。已取得维护者候选包的测试者请按对应包内说明操作；其测试记录不等于正式发布。
+本分支包含 Windows 安装与打包源码，可按 [Windows 预览说明](windows.md) 构建和安装。preview.6 对 DSH 与安装诊断有变化，需单独验证；旧 preview.5 的通过记录不等于本包正式发布。Qoder 可通过 `--source qodercn` 或明确组合启用。
 
 ### macOS 源码安装
 
@@ -73,7 +73,7 @@ python3 m1/integrated/integrated_bridge.py --once --source qodercn
 ## 只读与隐私
 
 - 会话文件按需以只读方式短暂打开，读完关闭。
-- 应用日志读取在存在 platform_support 模块时使用 open_read_shared，否则回退为普通只读打开。本 PR 本身不包含该模块；维护者的 Windows 候选包包含并验证了该依赖。不能宣称所有读取都使用 Windows 共享打开或绝不发生文件访问冲突。
+- 应用日志读取在存在 platform_support 模块时使用 open_read_shared，否则回退为普通只读打开。本整合分支及打包清单已包含该模块，并由隔离包测试核对依赖。不能宣称所有读取都使用 Windows 共享打开或绝不发生文件访问冲突。
 - 会话和应用日志会整行 JSON 解码，但只保留状态判断需要的字段，包括工具调用 ID；其余字段不保存、不输出。
 - 应用数据库以 mode=ro 打开，仅读取模型档位配置；不可用时使用回退档位。
 - 不写入 Qoder CN 目录，不修改其数据。

@@ -9,22 +9,17 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-try:
-    import fcntl
-except ImportError:  # Windows: imported only for tests, never for driving USB.
-    fcntl = None
-import glob
 import json
 import os
-import select
 import signal
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from platform_support import acquire_lock, bridge_lock_path, process_alive, open_read_shared, is_windows
+from serial_transport import serial_candidates, open_transport, write_frame
 
 
 EFFORT_SPEED = {
@@ -112,7 +107,7 @@ def is_root_meta(record: dict) -> bool:
 class RolloutFile:
     def __init__(self, path: Path):
         self.path = path
-        self.file = path.open("rb")
+        self.file = open_read_shared(path)
         first = self.file.readline()
         try:
             meta = json.loads(first)
@@ -138,7 +133,7 @@ class RolloutFile:
         stat = self.path.stat()
         if stat.st_ino != self.inode or stat.st_size < self.size:
             self.file.close()
-            self.file = self.path.open("rb")
+            self.file = open_read_shared(self.path)
             self.inode = stat.st_ino
             self.file.seek(0)
             self.pending = b""
@@ -285,7 +280,8 @@ class WorkBuddyDatabaseAdapter:
                         or not isinstance(session_id, str) or not session_id):
                     continue
                 try:
-                    os.kill(pid, 0)
+                    if not process_alive(pid):
+                        continue
                 except PermissionError:
                     # A sandbox may deny the probe even when the worker exists.
                     continue
@@ -405,57 +401,58 @@ class CombinedAdapter:
             adapter.close()
 
 
-def serial_candidates() -> list[str]:
-    patterns = ["/dev/cu.usbmodem*", "/dev/cu.usbserial*",
-                "/dev/serial/by-id/*", "/dev/ttyACM*", "/dev/ttyUSB*"]
-    return sorted({path for pattern in patterns for path in glob.glob(pattern)})
-
-
 class MotorSerial:
     def __init__(self, requested_port: str = "auto"):
         self.requested_port = requested_port
-        self.fd: int | None = None
+        self.transport = None
         self.path: str | None = None
         self.last_command: str | None = None
         self.last_sent_at = 0.0
         self.last_probe_at = -float("inf")
 
+    @property
+    def fd(self):
+        return self.transport.handle if self.transport is not None else None
+
     def close(self) -> None:
-        if self.fd is not None:
-            os.close(self.fd)
-        self.fd = None
+        if self.transport is not None:
+            try:
+                self.transport.close()
+            except OSError:
+                pass
+        self.transport = None
         self.path = None
         self.last_command = None
 
     def _probe(self, path: str) -> bool:
-        fd = None
+        transport = None
         try:
-            stty_flag = "-f" if sys.platform == "darwin" else "-F"
-            subprocess.run(["stty", stty_flag, path, "115200", "raw", "-echo"],
-                           check=True, capture_output=True, timeout=2)
-            fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            transport = open_transport(path, exclusive=False)
             time.sleep(0.6)
-            os.write(fd, b"PING\n")
+            write_frame(transport, b"PING\n")
             deadline = time.monotonic() + 1.5
             reply = b""
             while time.monotonic() < deadline:
-                ready, _, _ = select.select([fd], [], [], 0.2)
-                if ready:
-                    reply += os.read(fd, 4096)
+                chunk = transport.read(4096, 0.2)
+                if chunk:
+                    reply += chunk
                     if b"PONG" in reply:
-                        self.fd = fd
+                        self.transport = transport
                         self.path = path
                         self.last_command = None
                         print(f"Motor connected: {path}", flush=True)
                         return True
         except (OSError, subprocess.SubprocessError):
             pass
-        if fd is not None:
-            os.close(fd)
+        if transport is not None:
+            try:
+                transport.close()
+            except OSError:
+                pass
         return False
 
     def connect(self) -> bool:
-        if self.fd is not None and self.path and os.path.exists(self.path):
+        if self.fd is not None and self.path and (is_windows() or os.path.exists(self.path)):
             return True
         if self.fd is not None:
             self.close()
@@ -477,14 +474,12 @@ class MotorSerial:
         if command == self.last_command and now - self.last_sent_at < 2:
             return True
         try:
-            os.write(self.fd, (command + "\n").encode("ascii"))
+            write_frame(self.transport, (command + "\n").encode("ascii"))
             if command != self.last_command:
                 print(f"Motor [{self.path}]: {command}", flush=True)
             self.last_command = command
             self.last_sent_at = now
-            ready, _, _ = select.select([self.fd], [], [], 0)
-            if ready:
-                os.read(self.fd, 4096)
+            self.transport.read(4096, 0)
             return True
         except OSError:
             print(f"Motor disconnected: {self.path}; scanning USB ports", flush=True)
@@ -549,17 +544,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--stale-seconds must be positive")
     lock_file = None
     if not args.once and not args.no_motor:
-        if fcntl is None:
-            print("USB control requires macOS or Linux; --once shows state without opening USB",
-                  file=sys.stderr)
-            return 2
-        lock_path = Path(tempfile.gettempdir()) / f"codex-motor-bridge-{os.getuid()}.lock"
-        lock_file = lock_path.open("a+")
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file = acquire_lock(bridge_lock_path())
         except BlockingIOError:
             print("Another global motor bridge is already running", file=sys.stderr)
-            lock_file.close()
             return 2
     adapters = {}
     if args.source in ("codex", "both"):

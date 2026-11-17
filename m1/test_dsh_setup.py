@@ -129,11 +129,12 @@ class DshSetupTests(unittest.TestCase):
         self.assertEqual(text.count(BEGIN), 1)
         self.assertEqual(text.count(END), 1)
         self.assertIn(PLUGIN_ID, text)
-        self.assertIn(json.dumps(str(self.support / 'flower-observer.mjs')), text)
+        self.assertIn(json.dumps((self.support / 'flower-observer.mjs').as_uri()), text)
         self.assertIn('- id: agent-default-model', text)
         self.assertEqual(result['observer'].read_text(), self.source.read_text())
-        self.assertEqual(result['observer'].stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.support.stat().st_mode & 0o777, 0o700)
+        if sys.platform != 'win32':
+            self.assertEqual(result['observer'].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.support.stat().st_mode & 0o777, 0o700)
 
     def test_installing_twice_changes_nothing(self):
         self.patch.write_text('- id: agent-default-model\n  name: "x"\n')
@@ -154,8 +155,8 @@ class DshSetupTests(unittest.TestCase):
         install(self.home, 'desktop', self.root / 'moved', self.source)
         text = self.patch.read_text()
         self.assertEqual(text.count(BEGIN), 1)
-        self.assertIn(json.dumps(str(moved)), text)
-        self.assertNotIn(json.dumps(str(self.support / 'flower-observer.mjs')), text)
+        self.assertIn(json.dumps(moved.as_uri()), text)
+        self.assertNotIn(json.dumps((self.support / 'flower-observer.mjs').as_uri()), text)
 
     def test_install_accepts_an_empty_flow_list_profile(self):
         self.patch.write_text('[]\n')
@@ -245,7 +246,7 @@ class DshSetupTests(unittest.TestCase):
         self.patch.write_text('')
         install(self.home, 'desktop', spaced.parent, self.source)
         text = self.patch.read_text()
-        self.assertIn(f'name: "{spaced}"', text)
+        self.assertIn(f'name: "{spaced.as_uri()}"', text)
         self.assertTrue(has_block(text))
 
 

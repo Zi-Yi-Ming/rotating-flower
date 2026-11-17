@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from platform_support import is_windows, open_read_shared, windows_file_change_time
+
 _START = '<send_user_message_question_reply>'
 _END = '</send_user_message_question_reply>'
 _TOOL = 'request_user_input_async'
@@ -104,23 +106,25 @@ def _root_id(record: dict) -> str | None:
 class _Rollout:
     def __init__(self, path: Path):
         self.path = path
-        self.file = path.open('rb')
-        stat = path.stat()
-        self.inode = stat.st_ino
-        self.mtime_ns = stat.st_mtime_ns
         self.buffer = b''
         self.skip_long = False
         self.turn = None
-        first = self.file.readline(_MAX_LINE + 1)
-        if not first.endswith(b'\n'):
-            self.file.close()
-            raise ValueError('Incomplete session metadata')
-        try:
-            meta = json.loads(first)
-            self.session = _root_id(meta) if isinstance(meta, dict) else None
-        except (ValueError, UnicodeDecodeError):
-            self.session = None
-        self.offset = self.file.tell()
+        # Do not retain a Windows handle between polls: shared-delete permits
+        # rename/unlink, but does not make replacement of an open target portable.
+        with open_read_shared(path) as stream:
+            self.file = stream
+            stat = os.fstat(stream.fileno())
+            self.inode = stat.st_ino
+            self.mtime_ns = stat.st_mtime_ns
+            first = stream.readline(_MAX_LINE + 1)
+            if not first.endswith(b'\n'):
+                raise ValueError('Incomplete session metadata')
+            try:
+                meta = json.loads(first)
+                self.session = _root_id(meta) if isinstance(meta, dict) else None
+            except (ValueError, UnicodeDecodeError):
+                self.session = None
+            self.offset = stream.tell()
 
     def close(self):
         self.file.close()
@@ -130,7 +134,18 @@ class _Rollout:
                 or (stat.st_size == self.offset and stat.st_mtime_ns != self.mtime_ns))
 
     def read(self, stat):
-        """Yield only fresh relevant records, retaining incomplete trailing lines."""
+        """Reopen at the saved cursor, retaining parser state but no idle handle."""
+        with open_read_shared(self.path) as stream:
+            self.file = stream
+            current = os.fstat(stream.fileno())
+            if self.replaced(current):
+                # A replacement between discovery and open must not be parsed
+                # as the previous chat. The next poll reads its metadata anew.
+                raise OSError('Rollout changed before read')
+            stream.seek(self.offset)
+            yield from self._read_opened(current)
+
+    def _read_opened(self, stat):
         self.mtime_ns = stat.st_mtime_ns
         while True:
             chunk = self.file.read(65536)
@@ -197,6 +212,7 @@ class AttentionAdapter:
         self.start_timestamp = start_timestamp
         self.files: dict[Path, _Rollout] = {}
         self.ignored = {}
+        self.observed_files: dict[Path, tuple[int, int, int]] = {}
         self.pending: dict[tuple[str, str, int], _Pending] = {}
         # Tombstones prevent a duplicate/rotated older rollout from reviving replies.
         self.resolved: dict[tuple[str, str, int], float] = {}
@@ -280,7 +296,8 @@ class AttentionAdapter:
                                    dir=self.state_path.parent)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-                os.fchmod(stream.fileno(), 0o600)
+                if hasattr(os, 'fchmod'):
+                    os.fchmod(stream.fileno(), 0o600)
                 json.dump(data, stream, ensure_ascii=True, separators=(',', ':'))
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -458,14 +475,29 @@ class AttentionAdapter:
         # later replies/cancellations too, but never import unseeded older asks.
         replay_since = min([self.start_timestamp] + [p.timestamp for p in self.pending.values()])
         candidates = {}
+        observed = {}
+        on_windows = is_windows()
         if self.root.exists():
             for path in self.root.rglob('rollout-*.jsonl'):
                 try:
                     stat = path.stat()
                 except OSError:
                     continue
-                if stat.st_mtime >= replay_since or path in self.files:
+                signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                observed[path] = signature
+                previous = self.observed_files.get(path)
+                if stat.st_mtime >= replay_since or path in self.files or (
+                        previous is not None and previous != signature):
                     candidates[path] = stat
+                elif on_windows and previous is None:
+                    # NTFS can hold LastWriteTime at its old value while Codex appends.
+                    # Check ChangeTime once per file, including when the bridge restarts.
+                    try:
+                        if windows_file_change_time(path) >= replay_since:
+                            candidates[path] = stat
+                    except OSError:
+                        # An inaccessible file should be retried when it becomes readable.
+                        observed.pop(path, None)
         for path in list(self.files):
             if path not in candidates or self.files[path].replaced(candidates[path]):
                 self._drop_file(path)
@@ -479,6 +511,7 @@ class AttentionAdapter:
                 try:
                     file = _Rollout(path)
                 except (OSError, ValueError):
+                    observed.pop(path, None)
                     continue
                 if not file.session:
                     file.close()
@@ -493,6 +526,8 @@ class AttentionAdapter:
                         events.append((stamp, file.session, path, record, turn))
             except OSError:
                 self._drop_file(path)
+                observed.pop(path, None)
+        self.observed_files = observed
         # Stable timestamp ordering allows question/reply records in different
         # rollout instances of one chat to resolve consistently on startup.
         events.sort(key=lambda e:e[0])

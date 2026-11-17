@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePath
 
 BEGIN = '# BEGIN ROTATING-FLOWER DSH OBSERVER'
 END = '# END ROTATING-FLOWER DSH OBSERVER'
@@ -25,6 +25,8 @@ def dsh_home():
 
 
 def support_root():
+    if sys.platform == 'win32':
+        return Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData/Local') / 'RotatingFlower/dsh'
     return Path.home() / 'Library' / 'Application Support' / 'RotatingFlower' / 'dsh'
 
 
@@ -34,22 +36,32 @@ def profile_patch(home, profile='desktop'):
     return Path(home) / 'profiles' / profile / 'cordis.patch.yml'
 
 
+def plugin_file_uri(observer):
+    path = observer if isinstance(observer, PurePath) else Path(observer)
+    if isinstance(path, Path):
+        path = path.absolute()
+    return path.as_uri()
+
+
 def managed_block(observer):
     return '\n'.join([BEGIN, '- insert:', f'    - id: {PLUGIN_ID}',
-                      f'      name: {json.dumps(str(observer), ensure_ascii=False)}', END])
+                      f'      name: {json.dumps(plugin_file_uri(observer), ensure_ascii=False)}', END])
 
 
 def _locate_block(text):
     lines = text.splitlines(keepends=True)
-    begins = [i for i, line in enumerate(lines) if line.strip() == BEGIN]
-    ends = [i for i, line in enumerate(lines) if line.strip() == END]
+    begins = [i for i, line in enumerate(lines) if line.lstrip('\ufeff').strip() == BEGIN]
+    ends = [i for i, line in enumerate(lines) if line.lstrip('\ufeff').strip() == END]
     if not begins and not ends:
         if PLUGIN_ID in text:
             raise SetupError('DSH 中已有非标准小花插件配置，请先核对；未修改原配置。')
         return None
     if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
         raise SetupError('cordis.patch.yml 里的小花区块不完整，请手工修好后再试。')
-    return sum(map(len, lines[:begins[0]])), sum(map(len, lines[:ends[0] + 1]))
+    start = sum(map(len, lines[:begins[0]]))
+    if start == 0 and text.startswith('\ufeff'):
+        start = 1
+    return start, sum(map(len, lines[:ends[0] + 1]))
 
 
 def has_block(text):
@@ -57,21 +69,26 @@ def has_block(text):
 
 
 def _content_lines(text):
-    return [value for line in text.splitlines()
+    return [value for line in text.lstrip('\ufeff').splitlines()
             if (value := line.split('#', 1)[0].strip()) and value != '---']
 
 
 def _ensure_list(text):
     if not _content_lines(text):
-        return text + ('' if not text or text.endswith('\n') else '\n') + '[]\n'
+        newline = '\r\n' if '\r\n' in text else '\n'
+        return text + ('' if not text or text == '\ufeff' or text.endswith('\n') else newline) + '[]' + newline
     return text
 
 
 def apply_block(text, block):
+    if text.startswith('\ufeff'):
+        return '\ufeff' + apply_block(text[1:], block)
+    newline = '\r\n' if '\r\n' in text else '\n'
+    block = block.replace('\r\n', '\n').replace('\n', newline)
     found = _locate_block(text)
     if found:
         start, end = found
-        return text[:start] + block + '\n' + text[end:]
+        return text[:start] + block + newline + text[end:]
     lines = text.splitlines(keepends=True)
     content = _content_lines(text)
     if len(content) == 1 and re.fullmatch(r'\[\s*\]', content[0]):
@@ -79,7 +96,7 @@ def apply_block(text, block):
         text = ''.join((re.sub(r'^\s*\[\s*\][ \t]*', '', line) if '#' in line else '')
                        if re.fullmatch(r'\s*\[\s*\][ \t]*(?:#[^\r\n]*)?[\r\n]*', line)
                        else line for line in lines)
-    return text + ('' if not text or text.endswith(('\n', '\r')) else '\n') + block + '\n'
+    return text + ('' if not text or text.endswith(('\n', '\r')) else newline) + block + newline
 
 
 def strip_block(text):

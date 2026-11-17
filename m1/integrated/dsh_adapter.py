@@ -2,23 +2,22 @@
 from __future__ import annotations
 import json
 import math
-import os
 from pathlib import Path
 
-RANK = {'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'XHIGH': 4, 'ULTRA': 5}
+from platform_support import open_read_shared, process_alive as _process_alive, support_dir, is_windows
+
 
 def process_alive(pid):
-    # os.kill(pid, 0) is the POSIX liveness probe. On Windows it would terminate
-    # the process instead, so there the heartbeat is the only liveness signal.
-    if os.name == 'nt':
-        return True
+    # Preserve the existing POSIX probe policy; Windows access denial must
+    # remain an error rather than asserting that a task process is alive.
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
+        return _process_alive(pid)
     except PermissionError:
+        if is_windows():
+            raise
         return True
-    return True
+
+RANK = {'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'XHIGH': 4, 'ULTRA': 5}
 
 def speed_for_effort(effort):
     if effort is None:
@@ -29,7 +28,7 @@ def speed_for_effort(effort):
 class DshAdapter:
     MAX_BYTES = 1024 * 1024
     def __init__(self, path=None):
-        self.path = Path(path or Path.home() / 'Library/Application Support/RotatingFlower/dsh/status.json')
+        self.path = Path(path) if path is not None else support_dir() / 'dsh/status.json'
 
     def quiet(self, readiness, error=None):
         return {'healthy': False, 'readiness': readiness, 'error': error,
@@ -39,7 +38,9 @@ class DshAdapter:
 
     def poll(self, now):
         try:
-            with self.path.open('rb') as f:
+            # The observer replaces its heartbeat atomically. On Windows the
+            # reader must allow delete sharing so it cannot block that replace.
+            with open_read_shared(self.path) as f:
                 raw = f.read(self.MAX_BYTES + 1)
             if len(raw) > self.MAX_BYTES:
                 raise ValueError('oversized metadata')
@@ -58,7 +59,10 @@ class DshAdapter:
             pid = d.get('pid')
             if type(pid) is not int or pid <= 0:
                 raise ValueError('invalid process')
-            if not process_alive(pid):
+            try:
+                if not process_alive(pid):
+                    return self.quiet('not_running')
+            except ProcessLookupError:
                 return self.quiet('not_running')
             tasks = d.get('tasks')
             if not isinstance(tasks, list) or len(tasks) > 4096:
