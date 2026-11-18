@@ -424,9 +424,13 @@ class ClaudeSourceTests(unittest.TestCase):
         self.assertEqual(self.poll()['motor'], 'STOP')
 
     def test_root_precedence_and_absolute_resolution(self):
-        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.root/'env')}):
-            self.assertEqual(claude_root(), self.root/'env')
-            self.assertEqual(claude_root(self.root/'explicit'), self.root/'explicit')
+        # Temp roots may use aliases (/var on macOS, short paths on Windows).
+        # Include .. so canonicalization is exercised on every platform.
+        environment = self.root/'nested'/'..'/'env'
+        explicit = self.root/'nested'/'..'/'explicit'
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(environment)}):
+            self.assertEqual(claude_root(), (self.root/'env').resolve())
+            self.assertEqual(claude_root(explicit), (self.root/'explicit').resolve())
 
     def test_missing_root_quiet(self):
         source = ClaudeCodeSource(self.root/'missing')
